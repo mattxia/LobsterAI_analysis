@@ -4,13 +4,18 @@ import fs from 'fs';
 import path from 'path';
 import { cpRecursiveSync } from '../fsCompat';
 
+// --- Python 运行时目录与文件常量 ---
+// Windows 内置 Python 运行时目录名，对应 resources/python-win
 const PYTHON_RUNTIME_DIR_NAME = 'python-win';
+// 运行时状态文件名，记录同步时间和来源签名
 const PYTHON_RUNTIME_STATE_FILE = 'runtime.json';
 
+// 运行时必须存在的可执行文件
 const REQUIRED_FILES = [
   'python.exe',
   'python3.exe',
 ];
+// pip 可执行文件的候选相对路径（Windows .exe/.cmd + 类 Unix 无扩展名）
 const PIP_EXECUTABLE_CANDIDATES = [
   path.join('Scripts', 'pip.exe'),
   path.join('Scripts', 'pip3.exe'),
@@ -19,13 +24,16 @@ const PIP_EXECUTABLE_CANDIDATES = [
   path.join('Scripts', 'pip'),
   path.join('Scripts', 'pip3'),
 ];
+// pip 模块入口与初始化文件的相对路径，用于判断 pip 模块是否可用
 const PIP_MODULE_MAIN_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__main__.py');
 const PIP_MODULE_INIT_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__init__.py');
 
+// 检查运行时目录中是否存在 pip 可执行文件（任意候选路径命中即视为存在）
 function hasPipExecutable(rootDir: string): boolean {
   return PIP_EXECUTABLE_CANDIDATES.some((relPath) => fs.existsSync(path.join(rootDir, relPath)));
 }
 
+// 检查运行时是否具备完整的 pip 支持：既需要可执行命令，也需要 Python 模块文件
 function hasPipSupport(rootDir: string): boolean {
   const hasCommand = hasPipExecutable(rootDir);
   const hasModuleShim =
@@ -34,6 +42,7 @@ function hasPipSupport(rootDir: string): boolean {
   return hasCommand && hasModuleShim;
 }
 
+// 在运行时目录中查找 Python 可执行文件，返回首个存在的路径，不存在则返回 null
 function findPythonExecutable(rootDir: string): string | null {
   const candidates = [
     path.join(rootDir, 'python.exe'),
@@ -47,6 +56,7 @@ function findPythonExecutable(rootDir: string): string | null {
   return null;
 }
 
+// 读取运行时目录中的 Python embeddable ._pth 配置文件列表
 function readEmbedPthFiles(rootDir: string): string[] {
   try {
     return fs.readdirSync(rootDir).filter((name) => name.endsWith('._pth'));
@@ -55,6 +65,8 @@ function readEmbedPthFiles(rootDir: string): string[] {
   }
 }
 
+// 确保 embeddable Python 的 ._pth 配置启用了 site-packages 目录和 import site，
+// 否则 pip 安装的三方包无法被 import。原地修改文件，仅在内容变化时写入。
 function ensureEmbedSitePackages(rootDir: string): void {
   const pthFiles = readEmbedPthFiles(rootDir);
   if (pthFiles.length === 0) {
@@ -182,6 +194,7 @@ function computeRuntimeSignature(rootDir: string): string {
   return parts.join('|');
 }
 
+// 在运行时根目录写入 runtime.json 状态文件，记录同步时间、来源路径和签名
 function ensureRuntimeStateFile(runtimeRoot: string, sourceRoot: string): void {
   const statePath = path.join(runtimeRoot, PYTHON_RUNTIME_STATE_FILE);
   const payload = {
@@ -192,6 +205,8 @@ function ensureRuntimeStateFile(runtimeRoot: string, sourceRoot: string): void {
   fs.writeFileSync(statePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 }
 
+// 解析内置 Python 运行时根目录的候选路径：
+// 打包模式从 resourcesPath 和 appPath 查找；开发模式从项目根目录、cwd、appPath 查找
 function resolveBundledCandidates(): string[] {
   if (app.isPackaged) {
     return [
@@ -222,6 +237,8 @@ export function getUserPythonRoot(): string {
   return path.join(app.getPath('userData'), 'runtimes', PYTHON_RUNTIME_DIR_NAME);
 }
 
+// 将 Python 运行时根目录及 Scripts 子目录追加到环境变量的 PATH 中（仅 Windows 生效），
+// 并设置 LOBSTERAI_PYTHON_ROOT 指向首个可用根目录，供子进程继承
 export function appendPythonRuntimeToEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   if (process.platform !== 'win32') {
     return env;
@@ -310,6 +327,7 @@ export async function ensurePythonRuntimeReady(): Promise<{ success: boolean; er
   }
 }
 
+// 使用指定 Python 可执行文件执行命令，返回执行结果与错误详情
 function runPythonCommand(
   pythonExe: string,
   args: string[],
@@ -333,6 +351,7 @@ function runPythonCommand(
   return { ok: false, detail: detail || `exit code ${String(result.status)}` };
 }
 
+// 尝试通过 ensurepip 引导安装 pip：先运行 python -m ensurepip --upgrade，再验证 pip --version
 function tryBootstrapPip(rootDir: string): { ok: boolean; detail?: string } {
   const pythonExe = findPythonExecutable(rootDir);
   if (!pythonExe) {

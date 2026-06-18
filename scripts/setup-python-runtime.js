@@ -7,6 +7,13 @@
  * - Supports optional mirror URL via LOBSTERAI_PORTABLE_PYTHON_URL
  * - Can run cross-platform for Windows packaging
  * - Bundles interpreter runtime only (no preinstalled skill dependencies)
+ *
+ * 准备 Windows 打包内置的 Python 运行时，输出到 resources/python-win 目录。
+ * 该脚本的行为参考 setup-mingit.js：
+ * - 支持通过环境变量 LOBSTERAI_PORTABLE_PYTHON_ARCHIVE 指定本地离线归档
+ * - 支持通过环境变量 LOBSTERAI_PORTABLE_PYTHON_URL 指定镜像下载地址
+ * - 可跨平台运行，用于 Windows 打包
+ * - 仅内置解释器运行时，不预装 LobsterAI 技能所需的 Python 三方包
  */
 
 'use strict';
@@ -18,21 +25,24 @@ const { pipeline } = require('stream/promises');
 const { spawnSync } = require('child_process');
 const extractZip = require('extract-zip');
 
-const PROJECT_ROOT = path.resolve(__dirname, '..');
-const OUTPUT_DIR = path.join(PROJECT_ROOT, 'resources', 'python-win');
-const DEFAULT_ARCHIVE_PATH = path.join(PROJECT_ROOT, 'resources', 'python-win-runtime.zip');
-const DEFAULT_WINDOWS_EMBED_PYTHON_VERSION = process.env.LOBSTERAI_WINDOWS_EMBED_PYTHON_VERSION || '3.11.9';
-const DEFAULT_WINDOWS_EMBED_PYTHON_ZIP = `python-${DEFAULT_WINDOWS_EMBED_PYTHON_VERSION}-embed-amd64.zip`;
-const DEFAULT_WINDOWS_EMBED_PYTHON_URL = process.env.LOBSTERAI_WINDOWS_EMBED_PYTHON_URL
+// --- 路径与版本常量 ---
+const PROJECT_ROOT = path.resolve(__dirname, '..'); // 项目根目录
+const OUTPUT_DIR = path.join(PROJECT_ROOT, 'resources', 'python-win'); // 运行时输出目录
+const DEFAULT_ARCHIVE_PATH = path.join(PROJECT_ROOT, 'resources', 'python-win-runtime.zip'); // 默认归档缓存路径
+const DEFAULT_WINDOWS_EMBED_PYTHON_VERSION = process.env.LOBSTERAI_WINDOWS_EMBED_PYTHON_VERSION || '3.11.9'; // 默认 Python 版本
+const DEFAULT_WINDOWS_EMBED_PYTHON_ZIP = `python-${DEFAULT_WINDOWS_EMBED_PYTHON_VERSION}-embed-amd64.zip`; // embeddable 压缩包文件名
+const DEFAULT_WINDOWS_EMBED_PYTHON_URL = process.env.LOBSTERAI_WINDOWS_EMBED_PYTHON_URL // embeddable 下载地址
   || `https://www.python.org/ftp/python/${DEFAULT_WINDOWS_EMBED_PYTHON_VERSION}/${DEFAULT_WINDOWS_EMBED_PYTHON_ZIP}`;
-const DEFAULT_GET_PIP_URL = process.env.LOBSTERAI_WINDOWS_GET_PIP_URL || 'https://bootstrap.pypa.io/get-pip.py';
-const DEFAULT_PIP_PYZ_URL = process.env.LOBSTERAI_WINDOWS_PIP_PYZ_URL || 'https://bootstrap.pypa.io/pip/pip.pyz';
-const DEFAULT_RUNTIME_URL = DEFAULT_WINDOWS_EMBED_PYTHON_URL;
+const DEFAULT_GET_PIP_URL = process.env.LOBSTERAI_WINDOWS_GET_PIP_URL || 'https://bootstrap.pypa.io/get-pip.py'; // get-pip.py 引导脚本地址
+const DEFAULT_PIP_PYZ_URL = process.env.LOBSTERAI_WINDOWS_PIP_PYZ_URL || 'https://bootstrap.pypa.io/pip/pip.pyz'; // pip.pyz 归档地址
+const DEFAULT_RUNTIME_URL = DEFAULT_WINDOWS_EMBED_PYTHON_URL; // 默认运行时下载地址
 
+// 运行时必须存在的文件
 const REQUIRED_FILES = [
   'python.exe',
   'python3.exe',
 ];
+// pip 可执行文件的候选路径
 const PIP_EXECUTABLE_CANDIDATES = [
   path.join('Scripts', 'pip.exe'),
   path.join('Scripts', 'pip3.exe'),
@@ -41,25 +51,29 @@ const PIP_EXECUTABLE_CANDIDATES = [
   path.join('Scripts', 'pip'),
   path.join('Scripts', 'pip3'),
 ];
-const PIP_RUNTIME_ARCHIVE_REL_PATH = path.join('tools', 'pip.pyz');
-const PIP_MODULE_MAIN_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__main__.py');
-const PIP_MODULE_INIT_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__init__.py');
+const PIP_RUNTIME_ARCHIVE_REL_PATH = path.join('tools', 'pip.pyz'); // pip.pyz 在运行时中的相对路径
+const PIP_MODULE_MAIN_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__main__.py'); // pip 模块入口相对路径
+const PIP_MODULE_INIT_REL_PATH = path.join('Lib', 'site-packages', 'pip', '__init__.py'); // pip 模块初始化相对路径
 
+// 检查运行时目录中是否存在 pip 可执行文件
 function hasPipCommand(rootDir) {
   return PIP_EXECUTABLE_CANDIDATES.some((relPath) => fs.existsSync(path.join(rootDir, relPath)));
 }
 
+// 检查运行时目录中是否存在 pip Python 模块（__main__.py 或 __init__.py）
 function hasPipModule(rootDir) {
   return fs.existsSync(path.join(rootDir, PIP_MODULE_MAIN_REL_PATH))
     || fs.existsSync(path.join(rootDir, PIP_MODULE_INIT_REL_PATH));
 }
 
+// 解析命令行参数，--required 表示运行时为必需（缺失时抛错而非跳过）
 function parseArgs(argv) {
   return {
     required: argv.includes('--required'),
   };
 }
 
+// 将输入路径解析为绝对路径，无效输入返回 null
 function resolveInputPath(input) {
   if (typeof input !== 'string') return null;
   const trimmed = input.trim();
@@ -67,6 +81,7 @@ function resolveInputPath(input) {
   return path.isAbsolute(trimmed) ? trimmed : path.resolve(process.cwd(), trimmed);
 }
 
+// 判断文件是否存在且大小大于 0
 function isNonEmptyFile(filePath) {
   try {
     const stat = fs.statSync(filePath);
@@ -76,6 +91,7 @@ function isNonEmptyFile(filePath) {
   }
 }
 
+// 递归计算目录总大小（字节）
 function getDirSize(dir) {
   let size = 0;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -89,6 +105,7 @@ function getDirSize(dir) {
   return size;
 }
 
+// 运行时健康检查：校验必需文件和 pip 支持是否完整，返回缺失项列表
 function checkRuntimeHealth(rootDir, options = {}) {
   const requirePython3Alias = options.requirePython3Alias !== false;
   const requirePip = options.requirePip !== false;
@@ -118,6 +135,7 @@ function checkRuntimeHealth(rootDir, options = {}) {
   };
 }
 
+// 仅当文件内容变化时才写入，避免不必要的磁盘写入
 function writeFileIfChanged(filePath, content) {
   try {
     if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8') === content) {
@@ -130,6 +148,7 @@ function writeFileIfChanged(filePath, content) {
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
+// 创建 pip 命令包装脚本（Windows .cmd 和 bash shell 脚本），使 pip 可通过命令行直接调用
 function createPipWrappers(rootDir) {
   const scriptsDir = path.join(rootDir, 'Scripts');
   const pipCmd = [
@@ -160,6 +179,7 @@ function createPipWrappers(rootDir) {
   }
 }
 
+// 尝试从宿主机已安装的 Python 中复制 pip 包到目标运行时目录
 function tryCopyPipFromHostPython(rootDir) {
   const pythonCandidates = ['python3', 'python'];
   for (const candidate of pythonCandidates) {
@@ -231,6 +251,7 @@ function tryCopyPipFromHostPython(rootDir) {
   return { ok: false };
 }
 
+// 确保 pip 可用：先检查已有 pip，再尝试从宿主机复制，最后下载 pip.pyz 并创建 shim 模块
 async function ensurePipPayload(rootDir, options = {}) {
   const required = options.required !== false;
   const existingPipHealth = checkRuntimeHealth(rootDir, { requirePip: true });
@@ -274,6 +295,7 @@ async function ensurePipPayload(rootDir, options = {}) {
   const pipModuleDir = path.join(rootDir, 'Lib', 'site-packages', 'pip');
   const pipInitPath = path.join(pipModuleDir, '__init__.py');
   const pipMainPath = path.join(pipModuleDir, '__main__.py');
+  // 创建 pip 模块 shim：__main__.py 通过 runpy 加载 pip.pyz zipapp 归档来执行 pip
   const pipMain = [
     'import pathlib',
     'import runpy',
@@ -305,6 +327,7 @@ async function ensurePipPayload(rootDir, options = {}) {
   }
 }
 
+// 创建 python3.exe 别名（复制 python.exe），确保 python3 命令可用
 function ensurePython3Alias(rootDir) {
   const pythonExe = path.join(rootDir, 'python.exe');
   const python3Exe = path.join(rootDir, 'python3.exe');
@@ -314,6 +337,7 @@ function ensurePython3Alias(rootDir) {
   fs.copyFileSync(pythonExe, python3Exe);
 }
 
+// 在解压后的目录树中查找 Python 运行时根目录（包含 python.exe 的目录）
 function findRuntimeRoot(baseDir) {
   const directHealth = checkRuntimeHealth(baseDir, { requirePython3Alias: false, requirePip: false });
   if (directHealth.ok) {
@@ -346,6 +370,7 @@ function findRuntimeRoot(baseDir) {
   return null;
 }
 
+// 下载归档文件到指定路径，支持 HTTP 重定向，使用临时文件避免部分下载
 async function downloadArchive(url, destination) {
   const response = await fetch(url, { redirect: 'follow' });
   if (!response.ok || !response.body) {
@@ -372,6 +397,7 @@ async function downloadArchive(url, destination) {
   }
 }
 
+// 解析运行时归档来源：优先使用环境变量指定的本地归档，其次使用缓存，最后从 URL 下载
 async function resolveArchive(required) {
   const envArchive = resolveInputPath(process.env.LOBSTERAI_PORTABLE_PYTHON_ARCHIVE);
   if (envArchive) {
@@ -428,6 +454,7 @@ async function resolveArchive(required) {
   }
 }
 
+// 将运行时目录树从源目录复制到目标目录（先清空目标再复制）
 function copyRuntimeTree(sourceRoot, destRoot) {
   if (fs.existsSync(destRoot)) {
     fs.rmSync(destRoot, { recursive: true, force: true });
@@ -441,6 +468,7 @@ function copyRuntimeTree(sourceRoot, destRoot) {
   });
 }
 
+// 执行外部命令，失败时抛出包含 stderr/stdout 信息的错误
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -456,6 +484,7 @@ function runCommand(command, args, options = {}) {
   }
 }
 
+// 启用 site-packages 支持：修改 Python embeddable 的 ._pth 文件，添加 Lib\site-packages 和 import site
 function enableSitePackages(rootDir) {
   const pthCandidates = fs.readdirSync(rootDir).filter((name) => name.endsWith('._pth'));
   if (pthCandidates.length === 0) {
@@ -494,6 +523,7 @@ function enableSitePackages(rootDir) {
   fs.writeFileSync(pthPath, `${updated.join('\n').replace(/\n+$/g, '')}\n`, 'utf8');
 }
 
+// Windows 主机引导：从 python.org 下载 embeddable Python，解压并安装 pip，构建完整运行时
 async function bootstrapRuntimeOnWindows() {
   if (process.platform !== 'win32') {
     throw new Error('Windows bootstrap is only supported on Windows hosts.');
@@ -544,6 +574,7 @@ async function bootstrapRuntimeOnWindows() {
   }
 }
 
+// 解压归档到运行时目录：解压后查找运行时根目录，复制到输出目录，启用 site-packages 和 pip
 async function extractArchiveToRuntime(archivePath) {
   const tempRoot = fs.mkdtempSync(path.join(PROJECT_ROOT, 'tmp-python-runtime-'));
   try {
@@ -574,6 +605,7 @@ async function extractArchiveToRuntime(archivePath) {
   }
 }
 
+// 在指定目录中查找 Python 可执行文件（python.exe 或 python3.exe）
 function findPortablePythonExecutable(baseDir = OUTPUT_DIR) {
   const candidates = [
     path.join(baseDir, 'python.exe'),
@@ -587,6 +619,7 @@ function findPortablePythonExecutable(baseDir = OUTPUT_DIR) {
   return null;
 }
 
+// 确保便携式 Python 运行时可用：检查现有运行时，必要时从归档解压或 Windows 引导构建
 async function ensurePortablePythonRuntime(options = {}) {
   const required = Boolean(options.required);
   const shouldRun = process.platform === 'win32'
@@ -655,11 +688,13 @@ async function ensurePortablePythonRuntime(options = {}) {
   return { ok: true, skipped: false, pythonPath };
 }
 
+// 主入口：解析命令行参数并确保运行时准备就绪
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   await ensurePortablePythonRuntime({ required: args.required });
 }
 
+// 直接执行入口：解析参数并运行，出错时输出错误并退出
 if (require.main === module) {
   main().catch((error) => {
     console.error('[setup-python-runtime] ERROR:', error instanceof Error ? error.message : String(error));
@@ -667,6 +702,7 @@ if (require.main === module) {
   });
 }
 
+// 导出公共接口供 electron-builder-hooks 等外部脚本调用
 module.exports = {
   ensurePortablePythonRuntime,
   findPortablePythonExecutable,
